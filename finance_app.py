@@ -1053,28 +1053,89 @@ class FinanceApp(tk.Tk):
 
     def _build_stub_page(self, parent: tk.Misc, title: str, detail: str) -> None:
         self.make_page_header(parent, title, detail)
-        card = self.make_card(parent)
-        card.pack(fill="x", pady=(0, 16), ipadx=24, ipady=26)
-        tk.Label(card, text="Planning view", bg=self.CARD, fg=self.EMERALD, font=("TkDefaultFont", 13, "bold")).pack(anchor="w", padx=24, pady=(22, 6))
-        tk.Label(card, text="This workspace is ready for the next planning and insights build. Your current totals remain available from Dashboard and Transactions.", bg=self.CARD, fg=self.MUTED, wraplength=720, justify="left", font=("TkDefaultFont", 10)).pack(anchor="w", padx=24, pady=(0, 22))
 
     def build_budgets(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Budgets", "Set category limits")
+        year, month = self._period()
+        self.make_page_header(parent, "Budgets", f"Set category limits for {self._month_label(year, month)}")
+        card = self.make_card(parent); card.pack(fill="x", pady=(0, 16))
+        self._card_title(card, "Monthly budgets", "Edit a limit and save to refresh progress immediately")
+        for budget, spent, ratio in budget_progress(self.state, year, month):
+            row = tk.Frame(card, bg=self.CARD); row.pack(fill="x", padx=18, pady=6)
+            tk.Label(row, text=budget.category, bg=self.CARD, fg=self.INK, width=16, anchor="w", font=("TkDefaultFont", 10, "bold")).pack(side="left")
+            limit = tk.StringVar(value=f"{budget.limit:.2f}")
+            entry = ttk.Entry(row, textvariable=limit, width=12, style="Finwise.TEntry"); entry.pack(side="left", padx=8)
+            tk.Label(row, text=f"spent {self._currency(spent)}", bg=self.CARD, fg=self.MUTED).pack(side="left", padx=8)
+            def save(b=budget, var=limit):
+                try:
+                    value = parse_amount(var.get()); b.limit = value
+                    self._flash_message = f"{b.category} budget updated."; self.navigate("Budgets")
+                except ValueError as exc: self._flash_message = str(exc); self.navigate("Budgets")
+            self.make_button(row, "Save", save, kind="secondary").pack(side="right")
+            bar = ttk.Progressbar(card, maximum=1.0, value=min(ratio, 1.0)); bar.pack(fill="x", padx=18, pady=(0, 3))
+            tk.Label(card, text="Over budget" if ratio > 1 else f"{ratio:.0%} used", bg=self.CARD, fg=self.CORAL if ratio > 1 else self.EMERALD, font=("TkDefaultFont", 8, "bold")).pack(anchor="e", padx=18)
 
     def build_savings_goals(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Savings Goals", "Make progress on what matters")
+        self.make_page_header(parent, "Savings Goals", "Make progress on what matters")
+        if getattr(self, "_flash_message", ""): tk.Label(parent, text=self._flash_message, bg=self.CONTENT, fg=self.EMERALD).pack(anchor="w"); self._flash_message = ""
+        form = self.make_card(parent); form.pack(fill="x", pady=(0, 16)); self._card_title(form, "Create a goal")
+        body = tk.Frame(form, bg=self.CARD); body.pack(fill="x", padx=18, pady=(0, 16)); name=tk.StringVar(); target=tk.StringVar(); deadline=tk.StringVar(value="2027-12-31"); msg=tk.Frame(body,bg=self.CARD); msg.pack(fill="x")
+        self.make_form_field(body,"Goal name",name); self.make_form_field(body,"Target amount",target); self.make_form_field(body,"Deadline (YYYY-MM-DD)",deadline)
+        def add():
+            try: amount=parse_amount(target.get()); datetime.strptime(deadline.get(), "%Y-%m-%d")
+            except (ValueError, TypeError): self.show_inline_message(msg,"Enter a valid target and deadline."); return
+            if not name.get().strip(): self.show_inline_message(msg,"Enter a goal name."); return
+            self.state.goals.append(SavingsGoal(f"goal-{len(self.state.goals)+1:03d}",name.get().strip(),amount,0.0,deadline.get().strip())); self._flash_message="Goal created."; self.navigate("Savings Goals")
+        self.make_button(body,"Create goal",add).pack(anchor="w")
+        for goal in self.state.goals:
+            card=self.make_card(parent); card.pack(fill="x", pady=5); row=tk.Frame(card,bg=self.CARD); row.pack(fill="x", padx=18, pady=12)
+            tk.Label(row,text=goal.name,bg=self.CARD,fg=self.INK,font=("TkDefaultFont",11,"bold")).pack(side="left"); tk.Label(row,text=f"{self._currency(goal.current)} / {self._currency(goal.target)} · due {goal.deadline}",bg=self.CARD,fg=self.MUTED).pack(side="left",padx=16)
+            amount=tk.StringVar(); ttk.Entry(row,textvariable=amount,width=10,style="Finwise.TEntry").pack(side="right",padx=5)
+            def contribute(g=goal,var=amount):
+                try: contribute_to_goal(g,var.get()); self._flash_message="Contribution saved."; self.navigate("Savings Goals")
+                except ValueError: self._flash_message="Contribution must be positive."; self.navigate("Savings Goals")
+            self.make_button(row,"Contribute",contribute,kind="secondary").pack(side="right")
+            ttk.Progressbar(card,maximum=1.0,value=goal_progress(goal)).pack(fill="x",padx=18,pady=(0,4)); tk.Label(card,text=f"{goal_progress(goal):.0%} complete",bg=self.CARD,fg=self.EMERALD).pack(anchor="e",padx=18,pady=(0,8))
 
     def build_recurring_payments(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Recurring Payments", "Keep regular bills visible")
+        self.make_page_header(parent, "Recurring Payments", "Keep regular bills visible")
+        form=self.make_card(parent); form.pack(fill="x",pady=(0,16)); self._card_title(form,"Add recurring payment")
+        body=tk.Frame(form,bg=self.CARD); body.pack(fill="x",padx=18,pady=(0,16)); name=tk.StringVar(); amount=tk.StringVar(); day=tk.StringVar(value="1"); msg=tk.Frame(body,bg=self.CARD); msg.pack(fill="x")
+        self.make_form_field(body,"Name",name); self.make_form_field(body,"Amount",amount); self.make_form_field(body,"Due day (1-31)",day)
+        def add():
+            try: value=parse_amount(amount.get()); due=int(day.get()); assert 1<=due<=31
+            except (ValueError,TypeError,AssertionError): self.show_inline_message(msg,"Enter a valid amount and due day."); return
+            if not name.get().strip(): self.show_inline_message(msg,"Enter a payment name."); return
+            self.state.recurring_payments.append(RecurringPayment(f"rec-{len(self.state.recurring_payments)+1:03d}",name.get().strip(),value,due)); self._flash_message="Recurring payment added."; self.navigate("Recurring Payments")
+        self.make_button(body,"Add payment",add).pack(anchor="w")
+        listing=self.make_card(parent); listing.pack(fill="x"); self._card_title(listing,"Your recurring payments")
+        for payment in self.state.recurring_payments:
+            row=tk.Frame(listing,bg=self.CARD); row.pack(fill="x",padx=18,pady=7); tk.Label(row,text=payment.name,bg=self.CARD,fg=self.INK,font=("TkDefaultFont",10,"bold")).pack(side="left"); tk.Label(row,text=f"{self._currency(payment.amount)} · day {payment.due_day} · {payment.category}",bg=self.CARD,fg=self.MUTED).pack(side="left",padx=16)
+            def toggle(item=payment): item.active=not item.active; self.navigate("Recurring Payments")
+            self.make_button(row,"Pause" if payment.active else "Resume",toggle,kind="secondary").pack(side="right"); tk.Label(row,text="Active" if payment.active else "Paused",bg=self.CARD,fg=self.EMERALD if payment.active else self.MUTED).pack(side="right",padx=10)
 
     def build_reports(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Reports", "Understand your cash flow")
+        year,month=self._period(); income,expenses=totals_for_month(self.state,year,month); self.make_page_header(parent,"Reports",f"Cash flow for {self._month_label(year,month)}")
+        card=self.make_card(parent); card.pack(fill="x",pady=(0,16)); self._card_title(card,"Income versus expenses"); self._draw_bar_chart(card,[("Income",income),("Expenses",expenses)],colour=self.EMERALD)
+        net=income-expenses; tk.Label(parent,text=f"Net cash flow: {self._currency(net)}",bg=self.MINT if net>=0 else "#FCE8E5",fg=self.EMERALD if net>=0 else self.CORAL,font=("TkDefaultFont",14,"bold"),padx=16,pady=12).pack(fill="x")
 
     def build_analytics(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Analytics", "Spot useful patterns")
+        year,month=self._period(); self.make_page_header(parent,"Analytics","Spot useful patterns in your recent activity")
+        buckets=monthly_cashflow_buckets(self.state,6); card=self.make_card(parent); card.pack(fill="x",pady=(0,16)); self._card_title(card,"Six-month cash flow","Income and expenses by month")
+        self._draw_bar_chart(card,[(label,income) for label,income,_ in buckets],colour=self.EMERALD)
+        cat=self.make_card(parent); cat.pack(fill="x",pady=(0,16)); self._card_title(cat,"Top spending categories"); self._draw_bar_chart(cat,spending_by_category(self.state,year,month)[:5],colour=self.CORAL)
+        income,expenses=totals_for_month(self.state,year,month); insights=[f"You earned {self._currency(income)} this month.",f"You spent {self._currency(expenses)} across {len(spending_by_category(self.state,year,month))} categories.","Keep an eye on categories approaching their budget limits."]
+        for text in insights: tk.Label(parent,text="• "+text,bg=self.CONTENT,fg=self.INK,anchor="w",font=("TkDefaultFont",10)).pack(fill="x",pady=3)
 
     def build_settings(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Settings", "Tune your workspace")
+        self.make_page_header(parent,"Settings","Tune your workspace")
+        card=self.make_card(parent); card.pack(fill="x"); body=tk.Frame(card,bg=self.CARD); body.pack(fill="x",padx=18,pady=18)
+        currency=tk.StringVar(value=self.state.preferences.get("currency","USD")); start=tk.StringVar(value=self.state.preferences.get("start_page","Dashboard")); compact=tk.BooleanVar(value=self.state.preferences.get("compact","false")=="true")
+        for label,var,values in (("Currency",currency,("USD","EUR","GBP","INR")),("Start page",start,tuple(self.PAGE_METHODS))):
+            row=tk.Frame(body,bg=self.CARD); row.pack(fill="x",pady=6); tk.Label(row,text=label,bg=self.CARD,fg=self.INK,width=18,anchor="w").pack(side="left"); ttk.Combobox(row,textvariable=var,state="readonly",values=values,style="Finwise.TCombobox",width=24).pack(side="left")
+        ttk.Checkbutton(body,text="Use compact layout",variable=compact).pack(anchor="w",pady=10)
+        tk.Label(body,text="Theme: Light (fixed demo theme)",bg=self.CARD,fg=self.MUTED).pack(anchor="w",pady=(0,10))
+        def save(): self.state.preferences.update(currency=currency.get(),start_page=start.get(),compact="true" if compact.get() else "false"); self._flash_message="Settings saved for this session."; self.navigate("Settings")
+        self.make_button(body,"Save settings",save).pack(anchor="w")
 
 
 def main() -> None:
