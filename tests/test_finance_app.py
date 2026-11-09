@@ -7,6 +7,8 @@ from finance_app import (
     delete_transaction,
     goal_progress,
     parse_amount,
+    monthly_cashflow_buckets,
+    register_user,
     spending_by_category,
     totals_for_month,
 )
@@ -27,6 +29,16 @@ def test_parse_amount_requires_positive_number():
     with pytest.raises(ValueError):
         parse_amount("0")
     assert parse_amount("1,250.50") == 1250.50
+    for value in ("nan", "inf", "-inf"):
+        with pytest.raises(ValueError):
+            parse_amount(value)
+
+
+def test_seeded_state_spans_three_months_and_has_chart_buckets():
+    state = AppState.seeded()
+    buckets = monthly_cashflow_buckets(state, months=3, end_date="2026-11-30")
+    assert [bucket[0] for bucket in buckets] == ["2026-09", "2026-10", "2026-11"]
+    assert all(income >= 0 and expenses >= 0 for _, income, expenses in buckets)
 
 
 def test_month_totals_and_category_spending_are_derived_from_transactions():
@@ -58,3 +70,21 @@ def test_adding_expense_changes_month_total_and_delete_restores_it():
     assert totals_for_month(state, 2026, 11)[1] == before + 42.0
     assert delete_transaction(state, tx.id) is True
     assert totals_for_month(state, 2026, 11)[1] == before
+
+
+def test_registered_user_is_session_only():
+    state = AppState.seeded()
+    user = register_user(state, "Taylor Reed", "taylor@example.com", "secret1")
+    assert user in state.users
+    assert state.current_user is user
+    assert authenticate("taylor@example.com", "secret1", state.users) is user
+
+
+def test_added_transaction_id_does_not_collide_after_deletion():
+    state = AppState.seeded()
+    delete_transaction(state, "tx-015")
+    tx = add_transaction(state, "expense", 9, "Food", "Snack", "2026-11-09", "Checking")
+    assert tx.id == "tx-015"
+    delete_transaction(state, "tx-001")
+    replacement = add_transaction(state, "expense", 10, "Food", "Snack", "2026-11-09", "Checking")
+    assert replacement.id != "tx-001"

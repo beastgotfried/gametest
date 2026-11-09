@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+import math
 from typing import Optional
 
 
@@ -77,6 +78,7 @@ class User:
 
 @dataclass
 class AppState:
+    current_user: Optional[User] = None
     users: list[User] = field(default_factory=list)
     transactions: list[Transaction] = field(default_factory=list)
     categories: list[Category] = field(default_factory=list)
@@ -112,8 +114,12 @@ class AppState:
             Transaction("tx-010", "income", 210.0, "Freelance", "Small project", "2026-10-22", "Checking"),
             Transaction("tx-011", "expense", 1610.0, "Housing", "October rent", "2026-10-02", "Checking"),
             Transaction("tx-012", "expense", 72.15, "Food", "October groceries", "2026-10-12", "Checking"),
+            Transaction("tx-013", "income", 4800.0, "Salary", "September salary", "2026-09-01", "Checking"),
+            Transaction("tx-014", "expense", 1610.0, "Housing", "September rent", "2026-09-02", "Checking"),
+            Transaction("tx-015", "expense", 310.25, "Food", "September groceries", "2026-09-11", "Checking"),
         ]
         return cls(
+            current_user=user,
             users=[user],
             transactions=transactions,
             categories=categories,
@@ -156,7 +162,7 @@ def parse_amount(value: str) -> float:
         amount = float(value.replace(",", "").strip())
     except (TypeError, ValueError) as exc:
         raise ValueError("Amount must be numeric") from exc
-    if amount <= 0:
+    if not math.isfinite(amount) or amount <= 0:
         raise ValueError("Amount must be positive")
     return amount
 
@@ -193,6 +199,34 @@ def budget_progress(state: AppState, year: int, month: int) -> list[tuple[Budget
     return result
 
 
+def monthly_cashflow_buckets(
+    state: AppState,
+    months: int = 6,
+    end_date: date | datetime | str | None = None,
+) -> list[tuple[str, float, float]]:
+    """Return chronological ``(YYYY-MM, income, expenses)`` chart buckets."""
+    if months < 1:
+        return []
+    if end_date is None:
+        end = max((date.fromisoformat(tx.date[:10]) for tx in state.transactions), default=date.today())
+    elif isinstance(end_date, datetime):
+        end = end_date.date()
+    elif isinstance(end_date, date):
+        end = end_date
+    else:
+        end = date.fromisoformat(str(end_date)[:10])
+    # Anchor on the first day of the ending month, then walk backwards.
+    cursor = end.replace(day=1)
+    buckets: list[tuple[str, float, float]] = []
+    for offset in range(months - 1, -1, -1):
+        month_index = cursor.year * 12 + cursor.month - 1 - offset
+        year, month_zero_based = divmod(month_index, 12)
+        month = month_zero_based + 1
+        income, expenses = totals_for_month(state, year, month)
+        buckets.append((f"{year:04d}-{month:02d}", income, expenses))
+    return buckets
+
+
 def goal_progress(goal: SavingsGoal) -> float:
     if goal.target <= 0:
         return 1.0 if goal.current > 0 else 0.0
@@ -215,7 +249,15 @@ def add_transaction(
         datetime.strptime(date[:10], "%Y-%m-%d")
     except (TypeError, ValueError) as exc:
         raise ValueError("Date must use YYYY-MM-DD") from exc
-    tx = Transaction(f"tx-{len(state.transactions) + 1:03d}", type, amount, category, description, date[:10], account)
+    used_ids = {tx.id for tx in state.transactions}
+    numeric_ids = []
+    for used_id in used_ids:
+        if used_id.startswith("tx-") and used_id[3:].isdigit():
+            numeric_ids.append(int(used_id[3:]))
+    sequence = max(numeric_ids, default=0) + 1
+    while f"tx-{sequence:03d}" in used_ids:
+        sequence += 1
+    tx = Transaction(f"tx-{sequence:03d}", type, amount, category, description, date[:10], account)
     state.transactions.append(tx)
     return tx
 
@@ -235,6 +277,7 @@ def register_user(state: AppState, name: str, email: str, password: str) -> User
         raise ValueError("Email is already registered")
     user = User(f"user-{len(state.users) + 1:03d}", name.strip(), email.strip(), password)
     state.users.append(user)
+    state.current_user = user
     return user
 
 
