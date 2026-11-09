@@ -251,6 +251,12 @@ def add_transaction(
     if type not in {"income", "expense"}:
         raise ValueError("Transaction type must be income or expense")
     amount = parse_amount(str(amount))
+    if not isinstance(category, str) or not category.strip():
+        raise ValueError("Category is required")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("Description is required")
+    if not isinstance(account, str) or not account.strip():
+        raise ValueError("Account is required")
     try:
         datetime.strptime(date[:10], "%Y-%m-%d")
     except (TypeError, ValueError) as exc:
@@ -289,6 +295,43 @@ def register_user(state: AppState, name: str, email: str, password: str) -> User
 
 def contribute_to_goal(goal: SavingsGoal, amount: float) -> None:
     goal.current += parse_amount(str(amount))
+
+
+class RoundedCard(tk.Frame):
+    """A Tk-safe rounded panel approximation using a lowered Canvas backdrop."""
+
+    def __init__(self, parent: tk.Misc, *, fill: str, border: str, radius: int = 10, **kwargs) -> None:
+        super().__init__(parent, bg=parent.cget("bg") if "bg" in parent.keys() else fill, bd=0, highlightthickness=0, **kwargs)
+        self._fill = fill
+        self._border = border
+        self._radius = radius
+        self._backdrop = tk.Canvas(self, bg=self.cget("bg"), highlightthickness=0, bd=0)
+        self._backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._backdrop.lower()
+        self.bind("<Configure>", self._paint, add="+")
+
+    def _paint(self, _event=None) -> None:
+        canvas = self._backdrop
+        canvas.delete("all")
+        width, height = max(canvas.winfo_width(), 2), max(canvas.winfo_height(), 2)
+        radius = min(self._radius, width // 2, height // 2)
+        # Four corner arcs plus center rectangles keep the visual smooth while
+        # remaining available on Tk builds without a rounded-rectangle primitive.
+        canvas.create_rectangle(radius, 1, width - radius, height - 1, fill=self._border, outline=self._border)
+        canvas.create_rectangle(1, radius, width - 1, height - radius, fill=self._border, outline=self._border)
+        canvas.create_arc(1, 1, radius * 2, radius * 2, start=90, extent=90, fill=self._border, outline=self._border)
+        canvas.create_arc(width - radius * 2, 1, width - 1, radius * 2, start=0, extent=90, fill=self._border, outline=self._border)
+        canvas.create_arc(1, height - radius * 2, radius * 2, height - 1, start=180, extent=90, fill=self._border, outline=self._border)
+        canvas.create_arc(width - radius * 2, height - radius * 2, width - 1, height - 1, start=270, extent=90, fill=self._border, outline=self._border)
+        inset = 1
+        inner_r = max(radius - inset, 1)
+        canvas.create_rectangle(inner_r + inset, inset + 1, width - inner_r - inset, height - inset - 1, fill=self._fill, outline=self._fill)
+        canvas.create_rectangle(inset + 1, inner_r + inset, width - inset - 1, height - inner_r - inset, fill=self._fill, outline=self._fill)
+        canvas.create_arc(inset + 1, inset + 1, inner_r * 2 + inset + 1, inner_r * 2 + inset + 1, start=90, extent=90, fill=self._fill, outline=self._fill)
+        canvas.create_arc(width - inner_r * 2 - inset - 1, inset + 1, width - inset - 1, inner_r * 2 + inset + 1, start=0, extent=90, fill=self._fill, outline=self._fill)
+        canvas.create_arc(inset + 1, height - inner_r * 2 - inset - 1, inner_r * 2 + inset + 1, height - inset - 1, start=180, extent=90, fill=self._fill, outline=self._fill)
+        canvas.create_arc(width - inner_r * 2 - inset - 1, height - inner_r * 2 - inset - 1, width - inset - 1, height - inset - 1, start=270, extent=90, fill=self._fill, outline=self._fill)
+
 
 
 class FinanceApp(tk.Tk):
@@ -401,15 +444,7 @@ class FinanceApp(tk.Tk):
 
     def make_card(self, parent: tk.Misc, *, padding: int = 16, **kwargs) -> tk.Frame:
         """Return a light panel with the shared border and card surface."""
-        frame = tk.Frame(
-            parent,
-            bg=self.CARD,
-            highlightbackground=self.BORDER,
-            highlightcolor=self.BORDER,
-            highlightthickness=1,
-            bd=0,
-            **kwargs,
-        )
+        frame = RoundedCard(parent, fill=self.CARD, border=self.BORDER, **kwargs)
         # Consumers can use this value when they need a standard inset.
         frame.card_padding = padding  # type: ignore[attr-defined]
         return frame
@@ -624,67 +659,404 @@ class FinanceApp(tk.Tk):
         if hasattr(self, "_canvas"):
             self._canvas.yview_moveto(0)
 
-    def _build_stub_page(self, parent: tk.Misc, title: str, detail: str) -> None:
-        self.make_page_header(parent, title, detail)
-        card = self.make_card(parent)
-        card.pack(fill="x", pady=(0, 16), ipadx=24, ipady=26)
-        tk.Label(card, text="Coming next", bg=self.CARD, fg=self.EMERALD, font=("TkDefaultFont", 13, "bold")).pack(anchor="w", padx=24, pady=(22, 6))
-        tk.Label(card, text="This page is ready in the shell. Its data workflows will land in the next build.", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 10)).pack(anchor="w", padx=24, pady=(0, 22))
+    def _currency(self, value: float) -> str:
+        symbols = {"USD": "$", "EUR": "€", "GBP": "£", "INR": "₹"}
+        symbol = symbols.get(self.state.preferences.get("currency", "USD"), "$ ".strip())
+        return f"{symbol}{value:,.2f}"
+
+    def _period(self) -> tuple[int, int]:
+        """Use the newest transaction month so demo changes are immediately visible."""
+        dates: list[date] = []
+        for tx in self.state.transactions:
+            try:
+                dates.append(date.fromisoformat(tx.date[:10]))
+            except (TypeError, ValueError):
+                continue
+        latest = max(dates, default=date(2026, 11, 1))
+        return latest.year, latest.month
+
+    def _month_label(self, year: int, month: int) -> str:
+        return date(year, month, 1).strftime("%B %Y")
+
+    def _card_title(self, parent: tk.Misc, title: str, subtitle: str = "") -> None:
+        tk.Label(parent, text=title, bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 13, "bold")).pack(anchor="w", padx=18, pady=(18, 2))
+        if subtitle:
+            tk.Label(parent, text=subtitle, bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9)).pack(anchor="w", padx=18, pady=(0, 12))
+
+    def _draw_bar_chart(self, parent: tk.Misc, values: list[tuple[str, float]], *, colour: str = "#2FAE83", height: int = 210) -> tk.Canvas:
+        """Draw a small responsive category bar chart using only Canvas primitives."""
+        canvas = tk.Canvas(parent, height=height, bg=self.CARD, highlightthickness=0)
+        canvas.pack(fill="x", padx=18, pady=(4, 18))
+
+        def render(_event=None) -> None:
+            canvas.delete("all")
+            width = max(canvas.winfo_width(), 280)
+            if not values:
+                canvas.create_text(width / 2, height / 2, text="No spending recorded yet", fill=self.MUTED, font=("TkDefaultFont", 10))
+                return
+            top = max(value for _, value in values) or 1.0
+            left, right, top_pad, bottom = 100, 24, 14, 28
+            usable = max(width - left - right, 100)
+            row_h = max((height - top_pad - bottom) / len(values), 24)
+            for index, (label, value) in enumerate(values):
+                y = top_pad + index * row_h + row_h / 2
+                canvas.create_text(left - 8, y, text=label[:15], anchor="e", fill=self.INK, font=("TkDefaultFont", 9))
+                canvas.create_rectangle(left, y - 8, left + usable, y + 8, fill="#EDF2EF", outline="")
+                bar_width = usable * value / top
+                canvas.create_rectangle(left, y - 8, left + bar_width, y + 8, fill=colour, outline="")
+                canvas.create_text(left + usable + 4, y, text=self._currency(value), anchor="w", fill=self.MUTED, font=("TkDefaultFont", 8))
+
+        canvas.bind("<Configure>", render)
+        canvas.after_idle(render)
+        return canvas
+
+    def _action_link(self, parent: tk.Misc, text: str, command, *, colour: Optional[str] = None) -> ttk.Button:
+        button = ttk.Button(parent, text=text, command=command, style="Secondary.TButton")
+        button.pack(side="left", padx=(0, 8))
+        return button
 
     def build_dashboard(self, parent: tk.Misc) -> None:
-        self.make_page_header(parent, "Dashboard", "A quick read on your money this month")
-        year, month = 2026, 11
+        year, month = self._period()
+        self.make_page_header(parent, "Dashboard", f"A quick read on your money in {self._month_label(year, month)}")
         income, expenses = totals_for_month(self.state, year, month)
-        metrics = (("Income", income, self.EMERALD), ("Expenses", expenses, self.CORAL), ("Net cash flow", income - expenses, self.EMERALD if income >= expenses else self.CORAL), ("Accounts", len(self.state.accounts), self.INK))
+        total_balance = sum(account.balance for account in self.state.accounts)
+        metrics = (
+            ("Income", income, self.EMERALD, self._currency(income)),
+            ("Expenses", expenses, self.CORAL, self._currency(expenses)),
+            ("Net cash flow", income - expenses, self.EMERALD if income >= expenses else self.CORAL, self._currency(income - expenses)),
+            ("Total balance", total_balance, self.INK, self._currency(total_balance)),
+        )
         metrics_row = tk.Frame(parent, bg=self.CONTENT)
         metrics_row.pack(fill="x", pady=(0, 18))
         for index in range(4):
             metrics_row.columnconfigure(index, weight=1)
-        for index, (label, value, colour) in enumerate(metrics):
+        for index, (label, _value, colour, text) in enumerate(metrics):
             card = self.make_card(metrics_row)
             card.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 6, 0 if index == 3 else 6))
-            text = f"${value:,.2f}" if label != "Accounts" else str(value)
             tk.Label(card, text=label.upper(), bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 8, "bold")).pack(anchor="w", padx=16, pady=(15, 5))
             tk.Label(card, text=text, bg=self.CARD, fg=colour, font=("TkDefaultFont", 17, "bold")).pack(anchor="w", padx=16, pady=(0, 16))
 
         lower = tk.Frame(parent, bg=self.CONTENT)
-        lower.pack(fill="both", expand=True)
+        lower.pack(fill="x", pady=(0, 16))
         lower.columnconfigure(0, weight=3)
         lower.columnconfigure(1, weight=2)
         recent = self.make_card(lower)
         recent.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        tk.Label(recent, text="Recent transactions", bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 13, "bold")).pack(anchor="w", padx=18, pady=(18, 2))
-        tk.Label(recent, text="Your latest activity", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9)).pack(anchor="w", padx=18, pady=(0, 12))
-        for tx in list(reversed(self.state.transactions))[:6]:
+        self._card_title(recent, "Recent transactions", "The latest activity across your accounts")
+        for tx in sorted(self.state.transactions, key=lambda item: item.date, reverse=True)[:6]:
             row = tk.Frame(recent, bg=self.CARD)
             row.pack(fill="x", padx=18, pady=5)
-            colour = self.EMERALD if tx.type == "income" else self.CORAL
-            tk.Label(row, text=tx.description, bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10)).pack(side="left")
-            tk.Label(row, text=f"{'+' if tx.type == 'income' else '-'}${tx.amount:,.2f}", bg=self.CARD, fg=colour, font=("TkDefaultFont", 10, "bold")).pack(side="right")
+            marker = self.EMERALD if tx.type == "income" else self.CORAL
+            tk.Label(row, text="●", bg=self.CARD, fg=marker, font=("TkDefaultFont", 9)).pack(side="left", padx=(0, 8))
+            detail = tk.Frame(row, bg=self.CARD)
+            detail.pack(side="left", fill="x", expand=True)
+            tk.Label(detail, text=tx.description, bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10)).pack(anchor="w")
+            tk.Label(detail, text=f"{tx.category} · {tx.date[:10]}", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 8)).pack(anchor="w")
+            tk.Label(row, text=f"{'+' if tx.type == 'income' else '-'}{self._currency(tx.amount)}", bg=self.CARD, fg=marker, font=("TkDefaultFont", 10, "bold")).pack(side="right")
+        if not self.state.transactions:
+            tk.Label(recent, text="Add your first income or expense to see it here.", bg=self.CARD, fg=self.MUTED).pack(anchor="w", padx=18, pady=(8, 22))
+
         budget_card = self.make_card(lower)
         budget_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        tk.Label(budget_card, text="Budget pulse", bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 13, "bold")).pack(anchor="w", padx=18, pady=(18, 2))
-        tk.Label(budget_card, text="November spending", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9)).pack(anchor="w", padx=18, pady=(0, 12))
-        for budget, spent, ratio in budget_progress(self.state, year, month)[:4]:
-            tk.Label(budget_card, text=f"{budget.category}  ·  ${spent:,.0f} / ${budget.limit:,.0f}", bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 9)).pack(fill="x", padx=18, pady=(5, 2))
+        self._card_title(budget_card, "Budget pulse", f"{self._month_label(year, month)} category limits")
+        for budget, spent, ratio in budget_progress(self.state, year, month)[:5]:
+            colour = self.CORAL if ratio > 1 else self.EMERALD
+            tk.Label(budget_card, text=f"{budget.category}  ·  {self._currency(spent)} / {self._currency(budget.limit)}", bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 9)).pack(fill="x", padx=18, pady=(4, 2))
             bar = ttk.Progressbar(budget_card, maximum=1.0, value=min(ratio, 1.0))
-            bar.pack(fill="x", padx=18, pady=(0, 4))
+            bar.pack(fill="x", padx=18, pady=(0, 5))
+            tk.Label(budget_card, text="Over budget" if ratio > 1 else f"{ratio:.0%} used", bg=self.CARD, fg=colour, font=("TkDefaultFont", 8, "bold")).pack(anchor="e", padx=18)
+        if not self.state.budgets:
+            tk.Label(budget_card, text="No budgets yet.", bg=self.CARD, fg=self.MUTED).pack(anchor="w", padx=18, pady=(5, 20))
 
-    # Pages below are intentionally small placeholders for the later task.
+        chart_card = self.make_card(parent)
+        chart_card.pack(fill="x", pady=(0, 16))
+        self._card_title(chart_card, "Spending by category", f"Where {self._month_label(year, month)} expenses are going")
+        self._draw_bar_chart(chart_card, spending_by_category(self.state, year, month)[:6], colour=self.CORAL)
+
     def build_profile(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Profile", "Your personal details")
+        self.make_page_header(parent, "Profile", "Keep your personal details up to date")
+        user = self.current_user or self.state.current_user
+        if user is None:
+            return
+        card = self.make_card(parent)
+        card.pack(fill="x", pady=(0, 16), ipadx=22, ipady=18)
+        body = tk.Frame(card, bg=self.CARD)
+        body.pack(fill="x", padx=22, pady=20)
+        name = tk.StringVar(value=user.name)
+        email = tk.StringVar(value=user.email)
+        message_host = tk.Frame(body, bg=self.CARD)
+        message_host.pack(fill="x")
+        self.make_form_field(body, "Full name", name)
+        self.make_form_field(body, "Email", email)
+
+        def save() -> None:
+            if not name.get().strip() or not email.get().strip() or "@" not in email.get():
+                self.show_inline_message(message_host, "Enter a valid name and email address.")
+                return
+            if any(other is not user and other.email.lower() == email.get().strip().lower() for other in self.state.users):
+                self.show_inline_message(message_host, "That email is already registered.")
+                return
+            user.name = name.get().strip()
+            user.email = email.get().strip()
+            self.state.current_user = user
+            self.current_user = user
+            self.show_inline_message(message_host, "Profile saved for this session.", kind="success")
+            self._page_subtitle_var.set("Profile saved · changes are kept for this session")
+
+        self.make_button(body, "Save profile", save).pack(anchor="w", pady=(0, 8))
 
     def build_transactions(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Transactions", "Review your income and expenses")
+        year, month = self._period()
+        self.make_page_header(parent, "Transactions", "Search, filter, and manage every money movement")
+        if getattr(self, "_flash_message", ""):
+            host = tk.Frame(parent, bg=self.CONTENT)
+            host.pack(fill="x")
+            tk.Label(host, text=self._flash_message, bg=self.CONTENT, fg=self.EMERALD, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 12))
+            self._flash_message = ""
+        actions = tk.Frame(parent, bg=self.CONTENT)
+        actions.pack(fill="x", pady=(0, 14))
+        self._action_link(actions, "＋ Add income", lambda: self.navigate("Add Income"))
+        self._action_link(actions, "＋ Add expense", lambda: self.navigate("Add Expense"))
+        filters = self.make_card(parent)
+        filters.pack(fill="x", pady=(0, 12))
+        filter_body = tk.Frame(filters, bg=self.CARD)
+        filter_body.pack(fill="x", padx=16, pady=14)
+        type_var = tk.StringVar(value="All types")
+        category_var = tk.StringVar(value="All categories")
+        tk.Label(filter_body, text="Type", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
+        type_box = ttk.Combobox(filter_body, textvariable=type_var, state="readonly", values=("All types", "Income", "Expense"), width=14, style="Finwise.TCombobox")
+        type_box.pack(side="left", padx=(0, 20))
+        tk.Label(filter_body, text="Category", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(0, 6))
+        category_values = ["All categories"] + sorted({tx.category for tx in self.state.transactions})
+        category_box = ttk.Combobox(filter_body, textvariable=category_var, state="readonly", values=category_values, width=18, style="Finwise.TCombobox")
+        category_box.pack(side="left")
+        table = self.make_card(parent)
+        table.pack(fill="x")
+        header = tk.Frame(table, bg=self.MINT)
+        header.pack(fill="x", padx=1, pady=1)
+        columns = (("Date", 12), ("Description", 28), ("Category", 18), ("Account", 18), ("Amount", 16), ("", 8))
+        for title, width in columns:
+            tk.Label(header, text=title.upper(), bg=self.MINT, fg=self.INK, font=("TkDefaultFont", 8, "bold"), width=width, anchor="w").pack(side="left", padx=8, pady=8)
+        rows_host = tk.Frame(table, bg=self.CARD)
+        rows_host.pack(fill="x", padx=1, pady=(0, 1))
+
+        def render_rows(*_args) -> None:
+            for child in rows_host.winfo_children():
+                child.destroy()
+            selected_type = type_var.get().lower()
+            selected_category = category_var.get()
+            rows = [tx for tx in sorted(self.state.transactions, key=lambda item: item.date, reverse=True) if (selected_type in {"all types", tx.type}) and (selected_category == "All categories" or tx.category == selected_category)]
+            for index, tx in enumerate(rows):
+                row = tk.Frame(rows_host, bg="#FBFCFB" if index % 2 == 0 else self.CARD)
+                row.pack(fill="x")
+                colour = self.EMERALD if tx.type == "income" else self.CORAL
+                values = (tx.date[:10], tx.description[:28], tx.category, tx.account, f"{'+' if tx.type == 'income' else '-'}{self._currency(tx.amount)}")
+                for (value, (_title, width)) in zip(values, columns[:-1]):
+                    tk.Label(row, text=value, bg=row["bg"], fg=colour if value == values[-1] else self.INK, font=("TkDefaultFont", 9, "bold" if value == values[-1] else "normal"), width=width, anchor="w").pack(side="left", padx=8, pady=9)
+                self.make_button(row, "Delete", lambda tx_id=tx.id: self._delete_transaction_from_page(tx_id), kind="secondary").pack(side="left", padx=8, pady=4)
+            if not rows:
+                tk.Label(rows_host, text="No transactions match those filters.", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 10)).pack(anchor="w", padx=18, pady=22)
+
+        type_box.bind("<<ComboboxSelected>>", render_rows)
+        category_box.bind("<<ComboboxSelected>>", render_rows)
+        render_rows()
+
+    def _delete_transaction_from_page(self, transaction_id: str) -> None:
+        if delete_transaction(self.state, transaction_id):
+            self._flash_message = "Transaction deleted. Dashboard totals are up to date."
+            self.navigate("Transactions")
+
+    def build_add_transaction(self, kind: str) -> None:
+        kind = "income" if kind.lower().startswith("in") else "expense"
+        label = "Income" if kind == "income" else "Expense"
+        self.make_page_header(self._content_frame, f"Add {label}", f"Record {label.lower()} and keep your totals current")
+        parent = self._content_frame
+        card = self.make_card(parent)
+        card.pack(fill="x", pady=(0, 16), ipadx=22, ipady=18)
+        body = tk.Frame(card, bg=self.CARD)
+        body.pack(fill="x", padx=22, pady=20)
+        amount = tk.StringVar()
+        description = tk.StringVar()
+        tx_date = tk.StringVar(value=f"{self._period()[0]:04d}-{self._period()[1]:02d}-09")
+        categories = [category.name for category in self.state.categories if category.type == kind]
+        if not categories:
+            categories = sorted({tx.category for tx in self.state.transactions if tx.type == kind})
+        category = tk.StringVar(value=categories[0] if categories else "")
+        accounts = [account.name for account in self.state.accounts]
+        account = tk.StringVar(value=accounts[0] if accounts else "")
+        message_host = tk.Frame(body, bg=self.CARD)
+        message_host.pack(fill="x")
+        self.make_form_field(body, "Amount", amount)
+        self.make_form_field(body, "Description", description)
+        self.make_form_field(body, "Date (YYYY-MM-DD)", tx_date)
+        def combo_field(title: str, variable: tk.StringVar, values: list[str]) -> None:
+            row = tk.Frame(body, bg=self.CARD)
+            row.pack(fill="x", pady=(0, 14))
+            tk.Label(row, text=title, bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 6))
+            ttk.Combobox(row, textvariable=variable, state="readonly", values=values, style="Finwise.TCombobox").pack(fill="x")
+        combo_field("Category", category, categories)
+        combo_field("Account", account, accounts)
+
+        def save() -> None:
+            try:
+                parsed_amount = parse_amount(amount.get())
+                if not description.get().strip() or not category.get().strip() or not account.get().strip():
+                    raise ValueError("Description, category, and account are required")
+                datetime.strptime(tx_date.get().strip(), "%Y-%m-%d")
+                add_transaction(self.state, kind, parsed_amount, category.get().strip(), description.get().strip(), tx_date.get().strip(), account.get().strip())
+            except (ValueError, TypeError) as exc:
+                self.show_inline_message(message_host, str(exc))
+                return
+            self._flash_message = f"{label} saved. Your dashboard totals are updated."
+            self.navigate("Transactions")
+
+        button_row = tk.Frame(body, bg=self.CARD)
+        button_row.pack(fill="x", pady=(2, 0))
+        self.make_button(button_row, f"Save {label.lower()}", save).pack(side="left", padx=(0, 8))
+        self.make_button(button_row, "Cancel", lambda: self.navigate("Transactions"), kind="secondary").pack(side="left")
 
     def build_add_income(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Add Income", "Record money coming in")
+        self.build_add_transaction("income")
 
     def build_add_expense(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Add Expense", "Record money going out")
+        self.build_add_transaction("expense")
 
     def build_categories(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Categories", "Keep spending organized")
+        self.make_page_header(parent, "Categories", "Organize income and spending with clear labels")
+        card = self.make_card(parent)
+        card.pack(fill="x", pady=(0, 16), ipadx=20, ipady=16)
+        body = tk.Frame(card, bg=self.CARD)
+        body.pack(fill="x", padx=20, pady=18)
+        name = tk.StringVar()
+        kind = tk.StringVar(value="expense")
+        message_host = tk.Frame(body, bg=self.CARD)
+        message_host.pack(fill="x")
+        self.make_form_field(body, "New category", name)
+        row = tk.Frame(body, bg=self.CARD)
+        row.pack(fill="x", pady=(0, 14))
+        tk.Label(row, text="Type", bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        ttk.Combobox(row, textvariable=kind, state="readonly", values=("expense", "income"), style="Finwise.TCombobox").pack(fill="x")
+
+        def add() -> None:
+            cleaned = name.get().strip()
+            if not cleaned:
+                self.show_inline_message(message_host, "Enter a category name.")
+                return
+            if any(category.name.lower() == cleaned.lower() and category.type == kind.get() for category in self.state.categories):
+                self.show_inline_message(message_host, "That category already exists.")
+                return
+            next_id = f"cat-custom-{len(self.state.categories) + 1:03d}"
+            self.state.categories.append(Category(next_id, cleaned, kind.get(), self.EMERALD if kind.get() == "income" else self.CORAL))
+            self._flash_message = f"{cleaned} category added."
+            self.navigate("Categories")
+
+        self.make_button(body, "Add category", add).pack(anchor="w")
+        listing = self.make_card(parent)
+        listing.pack(fill="x")
+        self._card_title(listing, "Your categories", "Categories used by transactions stay protected")
+        for category in self.state.categories:
+            row = tk.Frame(listing, bg=self.CARD)
+            row.pack(fill="x", padx=18, pady=5)
+            tk.Label(row, text="●", bg=self.CARD, fg=category.color, font=("TkDefaultFont", 10)).pack(side="left", padx=(0, 8))
+            tk.Label(row, text=category.name, bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10, "bold")).pack(side="left")
+            tk.Label(row, text=category.type.title(), bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9)).pack(side="left", padx=12)
+            if category.id.startswith("cat-custom-"):
+                self.make_button(row, "Delete", lambda category_id=category.id: self._delete_category(category_id), kind="secondary").pack(side="right")
+
+    def _delete_category(self, category_id: str) -> None:
+        category = next((item for item in self.state.categories if item.id == category_id), None)
+        if category is None:
+            return
+        if any(tx.category == category.name for tx in self.state.transactions):
+            self._flash_message = f"{category.name} is used by a transaction and cannot be deleted."
+            self.navigate("Categories")
+            return
+        self.state.categories = [item for item in self.state.categories if item.id != category_id]
+        self._flash_message = f"{category.name} category deleted."
+        self.navigate("Categories")
+
+    def build_accounts(self, parent: tk.Misc) -> None:
+        self.make_page_header(parent, "Accounts", "Keep balances and connected institutions in one place")
+        if getattr(self, "_flash_message", ""):
+            tk.Label(parent, text=self._flash_message, bg=self.CONTENT, fg=self.EMERALD, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 12))
+            self._flash_message = ""
+        card = self.make_card(parent)
+        card.pack(fill="x", pady=(0, 16), ipadx=20, ipady=16)
+        body = tk.Frame(card, bg=self.CARD)
+        body.pack(fill="x", padx=20, pady=18)
+        name = tk.StringVar()
+        kind = tk.StringVar(value="checking")
+        balance = tk.StringVar(value="0")
+        institution = tk.StringVar()
+        message_host = tk.Frame(body, bg=self.CARD)
+        message_host.pack(fill="x")
+        self.make_form_field(body, "Account name", name)
+        row = tk.Frame(body, bg=self.CARD)
+        row.pack(fill="x", pady=(0, 14))
+        tk.Label(row, text="Account type", bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 6))
+        ttk.Combobox(row, textvariable=kind, state="readonly", values=("checking", "savings", "credit", "cash"), style="Finwise.TCombobox").pack(fill="x")
+        self.make_form_field(body, "Current balance", balance)
+        self.make_form_field(body, "Institution (optional)", institution)
+
+        def add() -> None:
+            cleaned = name.get().strip()
+            if not cleaned:
+                self.show_inline_message(message_host, "Enter an account name.")
+                return
+            try:
+                numeric_balance = float(balance.get().replace(",", "").strip() or "0")
+                if not math.isfinite(numeric_balance):
+                    raise ValueError
+            except (TypeError, ValueError):
+                self.show_inline_message(message_host, "Balance must be a valid number.")
+                return
+            if any(account.name.lower() == cleaned.lower() for account in self.state.accounts):
+                self.show_inline_message(message_host, "That account already exists.")
+                return
+            account_id = f"acct-custom-{len(self.state.accounts) + 1:03d}"
+            self.state.accounts.append(Account(account_id, cleaned, kind.get(), numeric_balance, institution.get().strip()))
+            self._flash_message = f"{cleaned} account added."
+            self.navigate("Accounts")
+
+        self.make_button(body, "Add account", add).pack(anchor="w")
+        listing = self.make_card(parent)
+        listing.pack(fill="x")
+        self._card_title(listing, "Your accounts", f"{len(self.state.accounts)} account{'s' if len(self.state.accounts) != 1 else ''}")
+        for account in self.state.accounts:
+            row = tk.Frame(listing, bg=self.CARD)
+            row.pack(fill="x", padx=18, pady=7)
+            detail = tk.Frame(row, bg=self.CARD)
+            detail.pack(side="left", fill="x", expand=True)
+            tk.Label(detail, text=account.name, bg=self.CARD, fg=self.INK, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+            tk.Label(detail, text=f"{account.kind.title()} · {account.institution or 'Personal'}", bg=self.CARD, fg=self.MUTED, font=("TkDefaultFont", 9)).pack(anchor="w")
+            tk.Label(row, text=self._currency(account.balance), bg=self.CARD, fg=self.CORAL if account.balance < 0 else self.EMERALD, font=("TkDefaultFont", 10, "bold")).pack(side="left", padx=14)
+            self.make_button(row, "Delete", lambda account_id=account.id: self._delete_account(account_id), kind="secondary").pack(side="right")
+
+    def _delete_account(self, account_id: str) -> None:
+        if len(self.state.accounts) <= 1:
+            self._flash_message = "Keep at least one account in your workspace."
+            self.navigate("Accounts")
+            return
+        account = next((item for item in self.state.accounts if item.id == account_id), None)
+        if account is None:
+            return
+        if any(tx.account == account.name for tx in self.state.transactions):
+            self._flash_message = f"{account.name} is used by a transaction and cannot be deleted yet."
+            self.navigate("Accounts")
+            return
+        if not messagebox.askyesno("Delete account?", f"Delete {account.name}? This action only affects this session.", parent=self):
+            return
+        self.state.accounts = [item for item in self.state.accounts if item.id != account_id]
+        self._flash_message = f"{account.name} account deleted."
+        self.navigate("Accounts")
+
+
+    def _build_stub_page(self, parent: tk.Misc, title: str, detail: str) -> None:
+        self.make_page_header(parent, title, detail)
+        card = self.make_card(parent)
+        card.pack(fill="x", pady=(0, 16), ipadx=24, ipady=26)
+        tk.Label(card, text="Planning view", bg=self.CARD, fg=self.EMERALD, font=("TkDefaultFont", 13, "bold")).pack(anchor="w", padx=24, pady=(22, 6))
+        tk.Label(card, text="This workspace is ready for the next planning and insights build. Your current totals remain available from Dashboard and Transactions.", bg=self.CARD, fg=self.MUTED, wraplength=720, justify="left", font=("TkDefaultFont", 10)).pack(anchor="w", padx=24, pady=(0, 22))
 
     def build_budgets(self, parent: tk.Misc) -> None:
         self._build_stub_page(parent, "Budgets", "Set category limits")
@@ -694,9 +1066,6 @@ class FinanceApp(tk.Tk):
 
     def build_recurring_payments(self, parent: tk.Misc) -> None:
         self._build_stub_page(parent, "Recurring Payments", "Keep regular bills visible")
-
-    def build_accounts(self, parent: tk.Misc) -> None:
-        self._build_stub_page(parent, "Accounts", "See your connected accounts")
 
     def build_reports(self, parent: tk.Misc) -> None:
         self._build_stub_page(parent, "Reports", "Understand your cash flow")
