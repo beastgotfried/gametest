@@ -1,0 +1,1 @@
+"""Individual Finwise page mixins."""

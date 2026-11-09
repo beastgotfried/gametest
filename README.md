@@ -46,14 +46,28 @@ For each test run, capture:
 
 ## Personal finance demo
 
-The repository also includes a lightweight Tkinter personal finance demo in
-`finance_app.py`.
+The repository also includes a lightweight Tkinter personal finance demo.
+The code is split by responsibility so each page section can be changed
+without editing one large file:
+
+- `main.py` is the primary launcher.
+- `finwise/core.py` contains the in-memory models and finance calculations.
+- `finwise/app.py` contains the shared Tk shell, authentication, and routing.
+- `finwise/widgets.py` contains reusable Tk widgets.
+- `finwise/pages/` contains one module per page section, including Dashboard,
+  Profile, Transactions, Add Income/Expense, Categories, Accounts, Budgets,
+  Savings Goals, Recurring Payments, Reports, Analytics, and Settings.
+- `finance_app.py` remains a compatibility launcher for existing commands.
 
 ### Run it
 
 Requirements and launch command:
 
 - Python 3.11 or newer
+- `python main.py`
+
+You can also use the backwards-compatible command:
+
 - `python finance_app.py`
 
 The demo starts with seeded data. Use these credentials on the login screen:
