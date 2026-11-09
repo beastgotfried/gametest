@@ -307,7 +307,11 @@ class RoundedCard(tk.Frame):
         self._radius = radius
         self._backdrop = tk.Canvas(self, bg=self.cget("bg"), highlightthickness=0, bd=0)
         self._backdrop.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self._backdrop.lower()
+        # Canvas overrides ``lower`` for lowering canvas items, so calling it
+        # with no item argument raises ``TclError``. Lower the widget itself
+        # through Tk's widget command so child controls remain above the
+        # painted rounded backdrop on every platform.
+        self._backdrop.tk.call("lower", self._backdrop._w)
         self.bind("<Configure>", self._paint, add="+")
 
     def _paint(self, _event=None) -> None:
